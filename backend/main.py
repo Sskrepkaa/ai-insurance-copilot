@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import get_connection
+from seed_data import ensure_seeded
 
 app = FastAPI(title="AI Insurance Copilot - Backend")
 
@@ -19,6 +20,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    """Create the schema and seed demo data on first run, so `uvicorn main:app`
+    works without a separate `python3 seed_data.py` step."""
+    ensure_seeded()
 
 
 @app.get("/claims")

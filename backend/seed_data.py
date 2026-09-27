@@ -35,13 +35,7 @@ CUSTOMER_HISTORY = [
 ]
 
 
-def seed() -> None:
-    # Start from a clean file so re-running the script is idempotent.
-    if DB_PATH.exists():
-        DB_PATH.unlink()
-
-    init_db()
-
+def _insert_seed_rows() -> None:
     conn = get_connection()
     try:
         conn.executemany(
@@ -58,7 +52,34 @@ def seed() -> None:
     finally:
         conn.close()
 
+
+def seed() -> None:
+    """Force a fresh reseed: wipes claims.db and recreates it from scratch."""
+    if DB_PATH.exists():
+        DB_PATH.unlink()
+
+    init_db()
+    _insert_seed_rows()
+
     print(f"Seeded {len(CLAIMS)} claims and {len(CUSTOMER_HISTORY)} customer_history rows into {DB_PATH}")
+
+
+def ensure_seeded() -> None:
+    """Create tables if missing and seed demo data only if claims is empty.
+
+    Used from the FastAPI startup hook so `uvicorn main:app` works out of the
+    box without a manual `python3 seed_data.py` step, while not clobbering
+    data (e.g. status changes) on every --reload restart.
+    """
+    init_db()
+    conn = get_connection()
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+    finally:
+        conn.close()
+
+    if count == 0:
+        _insert_seed_rows()
 
 
 if __name__ == "__main__":
