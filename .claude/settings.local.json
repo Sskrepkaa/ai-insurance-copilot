@@ -3,7 +3,24 @@
     "allow": [
       "Bash(ls -la /Users/sskrepkaamac/Desktop/Projects/ai-insurance-supp/ 2>/dev/null; echo \"---\"; ls -la /Users/sskrepkaamac/Desktop/Projects/ai-insurance-supp/.claude/agents/ 2>/dev/null; echo \"---existing example---\"; find /Users/sskrepkaamac/.claude -maxdepth 3 -iname \"*.md\" -path \"*agents*\" 2>/dev/null | head -5)",
       "Read(//Users/sskrepkaamac/.claude/**)",
-      "Bash(mkdir -p /Users/sskrepkaamac/Desktop/Projects/ai-insurance-supp/.claude/agents)"
+      "Bash(mkdir -p /Users/sskrepkaamac/Desktop/Projects/ai-insurance-supp/.claude/agents)",
+      "Bash(curl -s http://localhost:8000/claims -o /dev/null -w \"still alive, HTTP %{http_code}\\\\n\")",
+      "Bash(kill 7189)",
+      "Bash(git status *)",
+      "Bash(git check-ignore *)",
+      "Bash(npm --version)",
+      "Bash(npm create *)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost:8000/claims -m 3 -o /dev/null -w \"backend status: %{http_code}\\\\n\")",
+      "Bash(curl -s http://localhost:5173/src/main.jsx -m 5 -o /dev/null -w \"main.jsx status: %{http_code}\\\\n\")",
+      "Bash(rm -f claims.db)",
+      "Bash(../venv/bin/uvicorn main:app --port 8000)",
+      "Bash(curl -s http://localhost:8000/claims)",
+      "Bash(curl -s http://localhost:8000/claims/CLM-1001)",
+      "Bash(kill %1)",
+      "Bash(wait)",
+      "Read(//tmp/**)"
     ],
     "additionalDirectories": [
       "/Users/sskrepkaamac/Desktop/Projects/ai-insurance-supp/.claude"
