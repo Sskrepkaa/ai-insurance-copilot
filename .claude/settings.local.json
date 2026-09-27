@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /Users/sskrepkaamac/Desktop/Projects/ai-insurance-supp/ 2>/dev/null; echo \"---\"; ls -la /Users/sskrepkaamac/Desktop/Projects/ai-insurance-supp/.claude/agents/ 2>/dev/null; echo \"---existing example---\"; find /Users/sskrepkaamac/.claude -maxdepth 3 -iname \"*.md\" -path \"*agents*\" 2>/dev/null | head -5)",
+      "Read(//Users/sskrepkaamac/.claude/**)",
+      "Bash(mkdir -p /Users/sskrepkaamac/Desktop/Projects/ai-insurance-supp/.claude/agents)"
+    ],
+    "additionalDirectories": [
+      "/Users/sskrepkaamac/Desktop/Projects/ai-insurance-supp/.claude"
+    ]
+  }
+}
