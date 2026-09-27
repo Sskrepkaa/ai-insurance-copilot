@@ -5,10 +5,12 @@ endpoints (GET /claims, GET /claims/{claim_id}) plus the LangGraph-backed
 POST /chat and POST /resume endpoints for the tool-calling + HITL agent
 defined in agent.py.
 
-NOTE for the next agent (AI Judge): /chat and /resume build their response
-as a plain `dict` (`response = {...}`) before returning it - just add a
-`response["judge_score"] = ...` line in each handler once judge_response()
-exists. Nothing here needs to change shape-wise to accommodate that.
+AI Judge integration: /chat and /resume each build their response as a
+plain `dict` (`response = {...}`) and then set
+`response["judge_score"] = judge.judge_response(...)`, per the
+00_architecture.md contract. tool_outputs/question for the judge are
+recovered from the graph's message history via agent.extract_tool_outputs()
+/ agent.extract_original_question() - see judge.py for the judge itself.
 """
 
 from fastapi import FastAPI, HTTPException
@@ -16,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import agent
+import judge
 from db import get_connection
 from seed_data import ensure_seeded
 
@@ -101,12 +104,18 @@ def chat(req: ChatRequest):
             "thread_id": req.claim_id,
         }
 
+    final_text = agent.extract_final_text(result["messages"])
+    tool_outputs = agent.extract_tool_outputs(result["messages"])
+
     response = {
         "type": "answer",
-        "text": agent.extract_final_text(result["messages"]),
+        "text": final_text,
     }
     # judge-agent slots in here later, e.g.:
     #   response["judge_score"] = judge_response(...)
+    response["judge_score"] = judge.judge_response(
+        question=req.message, answer=final_text, tool_outputs=tool_outputs
+    )
     return response
 
 
@@ -119,12 +128,28 @@ def resume(req: ResumeRequest):
         config=config,
     )
 
+    final_text = agent.extract_final_text(result["messages"])
+    tool_outputs = agent.extract_tool_outputs(result["messages"])
+    # The /resume request body only carries the human's decision, not the
+    # original chat message - recover it from the thread's persisted
+    # message history (the checkpointer still has it) instead of judging
+    # against an empty question, and fold the human's decision in too since
+    # it's the context that actually produced this final answer.
+    original_question = agent.extract_original_question(result["messages"])
+    question_for_judge = (
+        f"{original_question}\n\n"
+        f"[Human-in-the-loop decision] approved={req.approved}, reason={req.reason!r}"
+    )
+
     response = {
         "type": "answer",
-        "text": agent.extract_final_text(result["messages"]),
+        "text": final_text,
     }
     # judge-agent slots in here later, e.g.:
     #   response["judge_score"] = judge_response(...)
+    response["judge_score"] = judge.judge_response(
+        question=question_for_judge, answer=final_text, tool_outputs=tool_outputs
+    )
     return response
 
 

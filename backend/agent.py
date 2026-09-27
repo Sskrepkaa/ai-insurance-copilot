@@ -252,3 +252,48 @@ def extract_interrupt_question(interrupt_payload) -> str:
     if isinstance(value, dict):
         return value.get("question", str(value))
     return str(value)
+
+
+def extract_tool_outputs(messages) -> list[dict]:
+    """Collect every ToolMessage in `messages` (the graph's full message
+    history for this thread, as returned by `graph.invoke(...)["messages"]`
+    or `graph.get_state(config).values["messages"]`) as
+    `[{"tool": <tool name>, "output": <parsed JSON or raw content>}, ...]`.
+
+    Used by main.py to feed judge.judge_response() the real data the
+    agent's tools returned, per 03_prompt_ai_judge_agent.md. `ToolNode`
+    JSON-serializes each tool's dict/list result into `ToolMessage.content`
+    (see the module docstring above), so we reverse that with `json.loads`;
+    if a given message's content isn't valid JSON for some reason, we fall
+    back to passing the raw string through rather than dropping it.
+    """
+    outputs = []
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        content = msg.content
+        if isinstance(content, str):
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                parsed = content
+        else:
+            parsed = content
+        outputs.append({"tool": msg.name, "output": parsed})
+    return outputs
+
+
+def extract_original_question(messages) -> str:
+    """Pull the first HumanMessage's content out of `messages` - the
+    original question the employee asked when this thread started.
+
+    Used for POST /resume, where the incoming request only carries the
+    human's approve/reject decision, not the original chat message: the
+    checkpointer still has it in the thread's persisted message history,
+    so we recover it from there instead of passing an empty string to the
+    judge.
+    """
+    for msg in messages:
+        if isinstance(msg, HumanMessage) and isinstance(msg.content, str) and msg.content:
+            return msg.content
+    return ""
