@@ -1,0 +1,448 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 100vh;
+}
+
+.app__header {
+  padding: 16px 24px;
+  background: #111827;
+  color: #fff;
+  text-align: left;
+}
+
+.app__header h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.app__subtitle {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: #9ca3af;
+}
+
+.app__body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.app__placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b7280;
+  padding: 24px;
+  text-align: center;
+}
+
+/* ---------- Claim list (left column) ---------- */
+
+.claim-list {
+  width: 340px;
+  flex-shrink: 0;
+  background: #fff;
+  border-right: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.claim-list__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 16px 16px 8px;
+}
+
+.claim-list__header h2 {
+  margin: 0;
+  font-size: 15px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #374151;
+}
+
+.claim-list__count {
+  font-size: 12px;
+  color: #9ca3af;
+  background: #f3f4f6;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.claim-list__status {
+  padding: 8px 16px;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.claim-list__status--error {
+  color: #b91c1c;
+}
+
+.claim-list__items {
+  overflow-y: auto;
+  padding: 4px 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.claim-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 12px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.claim-card:hover {
+  border-color: #a5b4fc;
+}
+
+.claim-card--selected {
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 1px #4f46e5;
+  background: #eef2ff;
+}
+
+.claim-card__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.claim-card__id {
+  font-weight: 600;
+  font-size: 13px;
+  color: #111827;
+}
+
+.claim-card__client {
+  font-size: 14px;
+  color: #374151;
+}
+
+.claim-card__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.claim-card__amount {
+  font-weight: 600;
+  color: #111827;
+}
+
+/* ---------- Status badge (shared) ---------- */
+
+.status-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: capitalize;
+  padding: 2px 9px;
+  border-radius: 999px;
+  line-height: 1.6;
+}
+
+.status-badge--pending {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.status-badge--approved {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.status-badge--rejected {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* ---------- Chat panel (right column) ---------- */
+
+.chat-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #f9fafb;
+}
+
+.chat-panel__header {
+  padding: 16px 24px;
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  text-align: left;
+}
+
+.chat-panel__header h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  color: #111827;
+}
+
+.chat-panel__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #4b5563;
+}
+
+.chat-panel__summary-item--fraud {
+  font-weight: 600;
+  color: #b45309;
+}
+
+.chat-panel__description {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.chat-panel__status {
+  font-size: 13px;
+  color: #6b7280;
+  margin: 4px 0;
+}
+
+.chat-panel__status--error {
+  color: #b91c1c;
+}
+
+.chat-panel__status--floating {
+  padding: 6px 24px;
+  margin: 0;
+  background: #fef2f2;
+  border-top: 1px solid #fecaca;
+}
+
+.chat-panel__messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-panel__empty {
+  color: #9ca3af;
+  font-size: 14px;
+  text-align: center;
+  margin-top: 32px;
+}
+
+.chat-message {
+  display: flex;
+}
+
+.chat-message--user {
+  justify-content: flex-end;
+}
+
+.chat-message--agent {
+  justify-content: flex-start;
+}
+
+.chat-message__bubble {
+  max-width: 70%;
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 14px;
+  line-height: 1.45;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  white-space: pre-wrap;
+}
+
+.chat-message--user .chat-message__bubble {
+  background: #4f46e5;
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+
+.chat-message--agent .chat-message__bubble {
+  background: #fff;
+  color: #111827;
+  border: 1px solid #e5e7eb;
+  border-bottom-left-radius: 4px;
+}
+
+.chat-message__bubble--thinking {
+  align-items: center;
+  color: #6b7280;
+  font-style: italic;
+}
+
+/* ---------- Judge indicator dot ---------- */
+
+.judge-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-top: 4px;
+  flex-shrink: 0;
+  cursor: help;
+}
+
+.judge-dot--pass {
+  background: #22c55e;
+}
+
+.judge-dot--fail {
+  background: #ef4444;
+}
+
+/* ---------- HITL block ---------- */
+
+.hitl-block {
+  align-self: stretch;
+  background: #fffbeb;
+  border: 2px solid #f59e0b;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.hitl-block__label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #b45309;
+  margin-bottom: 6px;
+}
+
+.hitl-block__question {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: #78350f;
+}
+
+.hitl-block__actions {
+  display: flex;
+  gap: 10px;
+}
+
+.hitl-block__resolved {
+  margin: 0;
+  font-size: 13px;
+  color: #78350f;
+  text-transform: capitalize;
+}
+
+.hitl-block__pending {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #b45309;
+}
+
+/* ---------- Buttons ---------- */
+
+.btn {
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn--approve {
+  background: #22c55e;
+  color: #fff;
+}
+
+.btn--reject {
+  background: #ef4444;
+  color: #fff;
+}
+
+.btn--send {
+  background: #4f46e5;
+  color: #fff;
+  padding: 0 20px;
+}
+
+/* ---------- Chat input ---------- */
+
+.chat-panel__input {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  padding: 14px 24px;
+  background: #fff;
+  border-top: 1px solid #e5e7eb;
+}
+
+.chat-panel__input textarea {
+  flex: 1;
+  resize: none;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 14px;
+}
+
+.chat-panel__input textarea:focus {
+  outline: none;
+  border-color: #4f46e5;
+}
+
+/* ---------- Spinner ---------- */
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #d1d5db;
+  border-top-color: #4f46e5;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 720px) {
+  .app__body {
+    flex-direction: column;
+  }
+
+  .claim-list {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid #e5e7eb;
+    max-height: 40vh;
+  }
+}
