@@ -48,13 +48,14 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt  # noqa: F401  (Command re-exported for main.py)
+from langchain_core.runnables import RunnableConfig
 
 import tools as backend_tools
 
 # Load backend/.env (GROQ_API_KEY=...) if present. Never commit a real key.
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
-MODEL_NAME = "llama-3.3-70b-versatile"
+MODEL_NAME = "openai/gpt-oss-120b"
 FRAUD_TOOL_NAME = "check_fraud_risk"
 FRAUD_RISK_THRESHOLD = 0.6
 
@@ -129,14 +130,30 @@ def _get_llm_with_tools():
 # --------------------------------------------------------------------------
 
 
-def call_model(state: MessagesState) -> dict:
+def call_model(state: MessagesState, config: RunnableConfig) -> dict:
     """Agent node: call the LLM (with tools bound) on the running
     conversation. A system prompt is prepended for this call only - it is
-    not persisted into state, so it isn't duplicated across turns."""
+    not persisted into state, so it isn't duplicated across turns.
+
+    `config["configurable"]["thread_id"]` is the claim_id main.py used to
+    start/resume this thread (see chat()/resume()). The user's message text
+    (e.g. "check this claim for fraud") never mentions the claim_id itself,
+    so without surfacing it here the model has no way to know which claim
+    "this" refers to and can't call the claim_id-taking tools correctly.
+    """
     llm_with_tools = _get_llm_with_tools()
     from langchain_core.messages import SystemMessage
 
-    messages = [SystemMessage(content=SYSTEM_PROMPT), *state["messages"]]
+    claim_id = (config or {}).get("configurable", {}).get("thread_id")
+    system_text = SYSTEM_PROMPT
+    if claim_id:
+        system_text += (
+            f" The employee is currently looking at claim '{claim_id}' - use "
+            "this as the claim_id argument for tools unless the user clearly "
+            "asks about a different claim."
+        )
+
+    messages = [SystemMessage(content=system_text), *state["messages"]]
     response = llm_with_tools.invoke(messages)
     return {"messages": [response]}
 
@@ -258,7 +275,17 @@ def extract_tool_outputs(messages) -> list[dict]:
     """Collect every ToolMessage in `messages` (the graph's full message
     history for this thread, as returned by `graph.invoke(...)["messages"]`
     or `graph.get_state(config).values["messages"]`) as
-    `[{"tool": <tool name>, "output": <parsed JSON or raw content>}, ...]`.
+    `[{"tool": <tool name>, "args": <call arguments>, "output": <parsed JSON
+    or raw content>}, ...]`.
+
+    `args` matters as much as `output` for the judge: e.g. check_fraud_risk
+    only *returns* {"risk_score": ..., "level": ...} - the claim_id it was
+    asked about never appears in its output. Without surfacing the call
+    arguments too, the judge sees the agent state "risk_score 0.16 for
+    CLM-1002" and flags "CLM-1002" as fabricated, even though it's exactly
+    the id the tool was invoked with - a false positive. We recover the
+    arguments by matching each ToolMessage.tool_call_id back to the
+    `tool_calls` entry with the same id on the preceding AIMessage.
 
     Used by main.py to feed judge.judge_response() the real data the
     agent's tools returned, per 03_prompt_ai_judge_agent.md. `ToolNode`
@@ -267,6 +294,15 @@ def extract_tool_outputs(messages) -> list[dict]:
     if a given message's content isn't valid JSON for some reason, we fall
     back to passing the raw string through rather than dropping it.
     """
+    call_args_by_id: dict[str, dict] = {}
+    for msg in messages:
+        if isinstance(msg, AIMessage):
+            for call in getattr(msg, "tool_calls", None) or []:
+                call_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
+                args = call.get("args") if isinstance(call, dict) else getattr(call, "args", None)
+                if call_id is not None:
+                    call_args_by_id[call_id] = args or {}
+
     outputs = []
     for msg in messages:
         if not isinstance(msg, ToolMessage):
@@ -279,7 +315,13 @@ def extract_tool_outputs(messages) -> list[dict]:
                 parsed = content
         else:
             parsed = content
-        outputs.append({"tool": msg.name, "output": parsed})
+        outputs.append(
+            {
+                "tool": msg.name,
+                "args": call_args_by_id.get(getattr(msg, "tool_call_id", None), {}),
+                "output": parsed,
+            }
+        )
     return outputs
 
 
