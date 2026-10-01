@@ -32,6 +32,21 @@ because the sketch in 02_prompt_langgraph_agent.md predates them):
   `ToolMessage.content` (via `json.dumps`), and sets `ToolMessage.name` to
   the tool's name - both confirmed empirically. `human_check` below relies
   on exactly that.
+
+HITL trigger design (fixed after a live bug report): the first version
+decided to pause for human approval by scanning the *entire* thread history
+for any past check_fraud_risk result above the threshold. That meant once a
+claim had ever been flagged high-risk, every later unrelated question in the
+same thread (e.g. "has this client filed a similar claim before?") wrongly
+re-triggered an Approve/Reject interrupt. The fix is twofold:
+  1. Intent, not data presence: the LLM must explicitly call a dedicated
+     `request_human_approval` tool to signal "I am now recommending an
+     approve/reject decision" - merely having called check_fraud_risk
+     (now or earlier) is not by itself a trigger.
+  2. Turn-scoped, not thread-scoped: the routing after the tools node only
+     looks at the batch of ToolMessages produced by the *current* tool-call
+     round (`_last_tool_batch`), never at older messages further back in
+     the thread.
 """
 
 from __future__ import annotations
@@ -56,8 +71,8 @@ import tools as backend_tools
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 MODEL_NAME = "openai/gpt-oss-120b"
-FRAUD_TOOL_NAME = "check_fraud_risk"
 FRAUD_RISK_THRESHOLD = 0.6
+REQUEST_APPROVAL_TOOL_NAME = "request_human_approval"
 
 AGENT_STATE_DB_PATH = Path(__file__).resolve().parent / "agent_state.db"
 
@@ -66,7 +81,20 @@ SYSTEM_PROMPT = (
     "You have tools to look up claim details, check fraud risk, and pull a "
     "customer's claim history. Use the tools whenever you need facts instead "
     "of guessing. Keep answers short and concrete, and mention the "
-    "fraud risk_score and level when you looked it up."
+    "fraud risk_score and level when you looked it up.\n\n"
+    f"If, after checking fraud risk, the risk_score is above "
+    f"{FRAUD_RISK_THRESHOLD} AND you are about to recommend approving or "
+    f"rejecting the claim to the employee, you MUST call the "
+    f"{REQUEST_APPROVAL_TOOL_NAME} tool with your recommendation instead of "
+    "stating it directly in text - the employee has to confirm it first. "
+    f"Do NOT call {REQUEST_APPROVAL_TOOL_NAME} just to report a risk score, "
+    "answer a history question, or for anything else where you are not "
+    "actually proposing an approve/reject decision right now. If the "
+    "expert's decision has already been recorded earlier in this "
+    f"conversation, do not call {REQUEST_APPROVAL_TOOL_NAME} again for the "
+    "same recommendation - just summarize the outcome, restating the claim "
+    "id and the risk_score/level you already found so the summary stands "
+    "on its own."
 )
 
 
@@ -98,7 +126,28 @@ def get_customer_history(client: str) -> list:
     return backend_tools.get_customer_history(client)
 
 
-all_tools = [get_claim_details, check_fraud_risk, get_customer_history]
+@tool
+def request_human_approval(claim_id: str, risk_score: float, recommendation: str) -> dict:
+    """Call this ONLY when you are actively recommending that the employee
+    approve or reject a claim (recommendation: "approve" or "reject") after
+    finding its fraud risk_score above the threshold, and you need their
+    confirmation before the recommendation counts as final. Do NOT call this
+    just to report a risk score or to answer an informational question
+    (e.g. claim history) - it is exclusively for "I am proposing a decision
+    right now, please confirm it." This tool is internal to the agent's
+    control flow, not one of the backend's data tools - it has no side
+    effects and simply signals intent; the actual confirmation happens via
+    the graph's human-in-the-loop interrupt.
+    """
+    return {"claim_id": claim_id, "risk_score": risk_score, "recommendation": recommendation}
+
+
+all_tools = [
+    get_claim_details,
+    check_fraud_risk,
+    get_customer_history,
+    request_human_approval,
+]
 
 # --------------------------------------------------------------------------
 # LLM - constructed lazily so `import agent` never requires GROQ_API_KEY.
@@ -160,66 +209,91 @@ def call_model(state: MessagesState, config: RunnableConfig) -> dict:
 
 def should_continue(state: MessagesState) -> str:
     """Route to the tool executor while the LLM keeps requesting tool
-    calls; once it stops, fall through to the human-in-the-loop check."""
+    calls; once it stops calling tools, the turn is over."""
     last = state["messages"][-1]
     if getattr(last, "tool_calls", None):
         return "tools"
-    return "human_check"
+    return END
 
 
-def _latest_fraud_risk_result(messages) -> dict | None:
-    """Scan backwards for the most recent ToolMessage produced by the
-    check_fraud_risk tool and return its parsed payload, or None if that
-    tool was never called (or its content couldn't be parsed)."""
-    for msg in reversed(messages):
-        if isinstance(msg, ToolMessage) and msg.name == FRAUD_TOOL_NAME:
-            content = msg.content
-            if isinstance(content, dict):
-                return content
-            if isinstance(content, str):
-                try:
-                    parsed = json.loads(content)
-                except json.JSONDecodeError:
-                    return None
-                return parsed if isinstance(parsed, dict) else None
+def _last_tool_batch(messages) -> list:
+    """Return only the ToolMessages produced by the *most recent* AIMessage's
+    tool_calls - i.e. the current tool-call round, not the whole thread
+    history. This is what makes HITL routing turn-scoped: a
+    request_human_approval call from three questions ago must not still
+    count now."""
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], AIMessage):
+            return messages[i + 1 :]
+    return []
+
+
+def _parse_tool_message_content(msg: ToolMessage) -> dict | None:
+    content = msg.content
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
             return None
+        return parsed if isinstance(parsed, dict) else None
     return None
 
 
-def human_check(state: MessagesState) -> dict:
-    """HITL node. If the latest check_fraud_risk result has risk_score
-    above the threshold, pause the graph with `interrupt(...)` and surface
-    a question for the human expert. Otherwise, do nothing and let the
-    graph finish.
+def route_after_tools(state: MessagesState) -> str:
+    """After the tools node runs, pause for human-in-the-loop only if the
+    agent just (this round) explicitly called request_human_approval -
+    never merely because check_fraud_risk returned a high score, and never
+    because of something called in an earlier turn. Otherwise loop back to
+    the agent so it can use the tool result(s) to keep answering."""
+    last_batch = _last_tool_batch(state["messages"])
+    if any(
+        isinstance(m, ToolMessage) and m.name == REQUEST_APPROVAL_TOOL_NAME
+        for m in last_batch
+    ):
+        return "human_check"
+    return "agent"
 
-    On resume, LangGraph re-runs this node from the top: the same
-    ToolMessage lookup happens again, but this time `interrupt(...)`
-    returns the human's decision (a dict: {"approved": bool, "reason":
-    str}) instead of raising, and we record it as a HumanMessage.
+
+def human_check(state: MessagesState) -> dict:
+    """HITL node, reached only via an explicit request_human_approval call
+    in the current tool-call round (see route_after_tools). Pause with
+    `interrupt(...)` and surface the agent's recommendation to the human
+    expert.
+
+    On resume, LangGraph re-runs this node from the top: the same lookup
+    happens again, but this time `interrupt(...)` returns the human's
+    decision (a dict: {"approved": bool, "reason": str}) instead of
+    raising, and we record it as a HumanMessage before looping back to the
+    agent so it can compose a final answer that reflects the decision.
     """
-    fraud_result = _latest_fraud_risk_result(state["messages"])
-    if fraud_result and fraud_result.get("risk_score", 0) > FRAUD_RISK_THRESHOLD:
-        decision = interrupt(
-            {
-                "question": (
-                    f"Risk score {fraud_result['risk_score']} detected. "
-                    "Confirm the expert's decision?"
+    last_batch = _last_tool_batch(state["messages"])
+    approval_msg = next(
+        (m for m in last_batch if isinstance(m, ToolMessage) and m.name == REQUEST_APPROVAL_TOOL_NAME),
+        None,
+    )
+    payload = _parse_tool_message_content(approval_msg) if approval_msg else None
+    payload = payload or {}
+
+    question = (
+        f"Risk score {payload.get('risk_score')} detected. The agent "
+        f"recommends to {payload.get('recommendation', 'approve/reject')} "
+        f"claim {payload.get('claim_id')}. Confirm the expert's decision?"
+    )
+    decision = interrupt({"question": question})
+    approved = decision.get("approved") if isinstance(decision, dict) else None
+    reason = decision.get("reason", "") if isinstance(decision, dict) else ""
+    return {
+        "messages": [
+            HumanMessage(
+                content=(
+                    f"Expert decision recorded: approved={approved}, "
+                    f"reason={reason!r}"
                 )
-            }
-        )
-        approved = decision.get("approved") if isinstance(decision, dict) else None
-        reason = decision.get("reason", "") if isinstance(decision, dict) else ""
-        return {
-            "messages": [
-                HumanMessage(
-                    content=(
-                        f"Expert decision recorded: approved={approved}, "
-                        f"reason={reason!r}"
-                    )
-                )
-            ]
-        }
-    return {"messages": []}
+            )
+        ]
+    }
 
 
 # --------------------------------------------------------------------------
@@ -232,11 +306,11 @@ builder.add_node("tools", ToolNode(all_tools))
 builder.add_node("human_check", human_check)
 
 builder.add_edge(START, "agent")
+builder.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
 builder.add_conditional_edges(
-    "agent", should_continue, {"tools": "tools", "human_check": "human_check"}
+    "tools", route_after_tools, {"human_check": "human_check", "agent": "agent"}
 )
-builder.add_edge("tools", "agent")
-builder.add_edge("human_check", END)
+builder.add_edge("human_check", "agent")
 
 # A single long-lived sqlite connection + SqliteSaver for the whole process.
 # check_same_thread=False + SqliteSaver's internal lock make this safe to

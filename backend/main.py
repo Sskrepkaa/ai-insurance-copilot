@@ -130,6 +130,18 @@ def resume(req: ResumeRequest):
 
     final_text = agent.extract_final_text(result["messages"])
     tool_outputs = agent.extract_tool_outputs(result["messages"])
+    # The human's approve/reject decision is a real fact too, just not one
+    # that came from a backend tool - it came directly from this request.
+    # Fold it into tool_outputs (in the same {tool, args, output} shape) so
+    # the judge treats "approved"/"reason" as grounded instead of flagging
+    # the final answer's mention of the outcome as fabricated.
+    tool_outputs = tool_outputs + [
+        {
+            "tool": "human_decision",
+            "args": {},
+            "output": {"approved": req.approved, "reason": req.reason},
+        }
+    ]
     # The /resume request body only carries the human's decision, not the
     # original chat message - recover it from the thread's persisted
     # message history (the checkpointer still has it) instead of judging
