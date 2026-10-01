@@ -280,6 +280,67 @@ def test_route_after_tools_allows_a_new_distinct_recommendation_for_same_claim()
     assert agent.route_after_tools({"messages": messages}) == "human_check"
 
 
+def test_route_after_tools_treats_a_rephrased_recommendation_as_the_same_decision():
+    """A rephrased-but-equivalent recommendation ("reject due to updated
+    risk assessment" vs. the previously-confirmed plain "reject") must
+    still be recognized as the same decision, not a new one - matching on
+    the leading approve/reject keyword rather than exact string equality."""
+    messages = [
+        HumanMessage(content="Проверь этот claim на мошенничество"),
+        *_resolved_approval_round("r1", "CLM-1003", 0.925, "reject", True, "проверено вручную"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                _tool_call(
+                    "r2b",
+                    "request_human_approval",
+                    {
+                        "claim_id": "CLM-1003",
+                        "risk_score": 0.925,
+                        "recommendation": "Reject due to updated risk assessment",
+                    },
+                )
+            ],
+        ),
+        _tool_message(
+            "r2b",
+            "request_human_approval",
+            {
+                "claim_id": "CLM-1003",
+                "risk_score": 0.925,
+                "recommendation": "Reject due to updated risk assessment",
+            },
+        ),
+    ]
+    assert agent.route_after_tools({"messages": messages}) == "already_decided"
+
+
+def test_route_after_tools_still_distinguishes_rephrased_opposite_recommendations():
+    """Sanity check for the same normalization: a rephrased recommendation
+    that keeps a DIFFERENT keyword (prior "reject" vs. new "I'd now
+    approve this one") must still be treated as a new decision."""
+    messages = [
+        HumanMessage(content="Проверь этот claim на мошенничество"),
+        *_resolved_approval_round("r1", "CLM-1003", 0.925, "reject", False, "отклонено"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                _tool_call(
+                    "r2b",
+                    "request_human_approval",
+                    {"claim_id": "CLM-1003", "risk_score": 0.4, "recommendation": "I'd now approve this one"},
+                )
+            ],
+        ),
+        _tool_message(
+            "r2b",
+            "request_human_approval",
+            {"claim_id": "CLM-1003", "risk_score": 0.4, "recommendation": "I'd now approve this one"},
+        ),
+    ]
+    assert agent.route_after_tools({"messages": messages}) == "human_check"
+
+
 def test_route_after_tools_allows_a_fresh_request_for_a_different_claim():
     """A request_human_approval for a DIFFERENT claim_id than the one
     already confirmed must not be suppressed - it's an unrelated decision."""
@@ -417,6 +478,8 @@ if __name__ == "__main__":
         test_should_continue_routes_to_tools_then_end,
         test_route_after_tools_treats_repeated_identical_approval_request_as_already_decided,
         test_route_after_tools_allows_a_new_distinct_recommendation_for_same_claim,
+        test_route_after_tools_treats_a_rephrased_recommendation_as_the_same_decision,
+        test_route_after_tools_still_distinguishes_rephrased_opposite_recommendations,
         test_route_after_tools_allows_a_fresh_request_for_a_different_claim,
         test_repeated_duplicate_requests_stay_bounded_not_escalating,
         test_extract_tool_outputs_surfaces_recorded_decision_for_later_chat_calls,

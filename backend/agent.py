@@ -280,6 +280,28 @@ def _message_index(messages, target) -> int:
     return len(messages)
 
 
+def _normalize_recommendation(value) -> str:
+    """Reduce a recommendation to just its "approve"/"reject" keyword
+    (case-insensitive), ignoring any extra text the model tacks on - e.g.
+    "reject due to updated risk assessment" still matches a prior plain
+    "reject". request_human_approval's own docstring tells the model to
+    pass exactly "approve" or "reject", but nothing enforces that at the
+    tool-call boundary, so the comparison in route_after_tools() needs to
+    tolerate a rephrase rather than treating it as a brand-new decision
+    just because the exact string differs. Falls back to the stripped,
+    lowercased original text if neither keyword appears, so an unexpected
+    format still compares sanely instead of silently matching everything.
+    """
+    if not isinstance(value, str):
+        return ""
+    lowered = value.strip().lower()
+    if "approve" in lowered:
+        return "approve"
+    if "reject" in lowered:
+        return "reject"
+    return lowered
+
+
 def _confirmed_decisions(messages) -> dict[str, dict]:
     """Scan `messages` for (request_human_approval -> immediately followed,
     later in the list, by human_check's "Expert decision recorded..."
@@ -289,7 +311,18 @@ def _confirmed_decisions(messages) -> dict[str, dict]:
     Used to detect when the agent is about to re-request approval for a
     claim_id + recommendation that was already confirmed earlier in this
     same thread, so route_after_tools can skip interrupting again for the
-    exact same ask (see its docstring for why this matters)."""
+    exact same ask (see its docstring for why this matters).
+
+    Known limitation: this only compares claim_id + (normalized)
+    recommendation, NOT risk_score. If the same claim is re-evaluated and
+    comes back with a different risk_score but the SAME recommendation
+    (e.g. 0.95 -> 0.80, still "reject"), the dedup guard still treats it as
+    the already-decided case and will NOT offer a fresh interrupt - even
+    though the underlying number changed. Acceptable for this demo (the
+    thing the human is actually confirming is the approve/reject call, not
+    the exact score), but worth revisiting if the project grows a reason
+    to re-confirm on a materially changed risk_score with an unchanged
+    recommendation."""
     confirmed: dict[str, dict] = {}
     pending_payload: dict | None = None
     for msg in messages:
@@ -337,7 +370,10 @@ def route_after_tools(state: MessagesState) -> str:
 
     prior = _confirmed_decisions(messages[: _message_index(messages, approval_msg)])
     already = prior.get(payload.get("claim_id"))
-    if already is not None and already.get("recommendation") == payload.get("recommendation"):
+    if already is not None and (
+        _normalize_recommendation(already.get("recommendation"))
+        == _normalize_recommendation(payload.get("recommendation"))
+    ):
         return "already_decided"
     return "human_check"
 
