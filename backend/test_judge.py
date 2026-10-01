@@ -157,6 +157,104 @@ def test_prompt_actually_contains_real_tool_outputs_not_a_placeholder():
     print("test_prompt_actually_contains_real_tool_outputs_not_a_placeholder: PASS")
 
 
+def test_hallucinated_claim_id_forces_fail_even_if_llm_wrongly_says_pass():
+    """Regression test for a live bug: the LLM judge can be fooled by a
+    fluent-sounding but invented claim id. get_customer_history returns []
+    (no history at all), yet the answer states a specific past claim id/
+    date/status - the deterministic claim-id check must force "fail" even
+    though the (fake, stand-in-for-a-mistaken-real) LLM says "pass"."""
+    tool_outputs = [
+        {"tool": "get_customer_history", "args": {"client": "New Client"}, "output": []},
+    ]
+    judge_raw = json.dumps(
+        {"groundedness": 0.95, "relevance": 0.95, "verdict": "pass", "reason": "Looks fine."}
+    )
+    result, _ = _run_with_fake_llm(
+        judge_raw,
+        question="Какой был предыдущий claim этого клиента и когда он произошёл?",
+        answer="Предыдущий claim клиента - CLM-0733, подан 1 декабря 2022, статус одобрен.",
+        tool_outputs=tool_outputs,
+    )
+    assert result["verdict"] == "fail", "an invented claim id must fail even if the LLM judge missed it"
+    assert result["groundedness"] <= 0.2
+    assert "CLM-0733" in result["reason"]
+    print("test_hallucinated_claim_id_forces_fail_even_if_llm_wrongly_says_pass: PASS ->", result)
+
+
+def test_real_history_entry_claim_id_is_not_flagged():
+    """Regression guard against a false positive: a claim id that genuinely
+    came back from get_customer_history (e.g. an older, pre-system claim
+    like "CLM-0733" for a client whose *current* claim is "CLM-1005") must
+    NOT be treated as hallucinated just because it doesn't match the
+    CLM-100X numbering of the active claims table."""
+    tool_outputs = [
+        {
+            "tool": "get_customer_history",
+            "args": {"client": "Dmitry Sokolov"},
+            "output": [{"id": 9, "client": "Dmitry Sokolov", "claim_id": "CLM-0733", "date": "2022-12-01", "outcome": "approved"}],
+        },
+    ]
+    judge_raw = json.dumps({"groundedness": 1.0, "relevance": 1.0, "verdict": "pass"})
+    result, _ = _run_with_fake_llm(
+        judge_raw,
+        question="Какой был предыдущий claim этого клиента и когда он произошёл?",
+        answer="Предыдущий claim клиента - CLM-0733, подан 1 декабря 2022, статус одобрен.",
+        tool_outputs=tool_outputs,
+    )
+    assert result["verdict"] == "pass", "CLM-0733 is real data from get_customer_history, not a hallucination"
+    assert result["groundedness"] == 1.0
+    print("test_real_history_entry_claim_id_is_not_flagged: PASS ->", result)
+
+
+def test_claim_id_from_call_args_only_is_not_flagged():
+    """A claim id that only appears in a tool call's args (e.g.
+    check_fraud_risk's own output never repeats the id it was called
+    with) must still count as grounded - covers the same args-matter-too
+    fix extract_tool_outputs() relies on, from the judge's side."""
+    tool_outputs = [
+        {"tool": "check_fraud_risk", "args": {"claim_id": "CLM-1002"}, "output": {"risk_score": 0.16, "level": "low"}},
+    ]
+    judge_raw = json.dumps({"groundedness": 1.0, "relevance": 1.0, "verdict": "pass"})
+    result, _ = _run_with_fake_llm(
+        judge_raw,
+        question="Проверь этот claim на мошенничество",
+        answer="Fraud risk for claim CLM-1002: risk_score = 0.16, level = low.",
+        tool_outputs=tool_outputs,
+    )
+    assert result["verdict"] == "pass"
+    print("test_claim_id_from_call_args_only_is_not_flagged: PASS ->", result)
+
+
+def test_unicode_dash_in_answer_does_not_cause_a_false_flag():
+    """LLMs sometimes render ids with a typographic dash (U+2011) instead
+    of a plain ASCII hyphen; the id-matching check must normalize both
+    sides so this formatting quirk doesn't look like a different,
+    ungrounded id."""
+    tool_outputs = [
+        {"tool": "get_claim_details", "args": {"claim_id": "CLM-1005"}, "output": {"id": "CLM-1005", "client": "Dmitry Sokolov"}},
+    ]
+    judge_raw = json.dumps({"groundedness": 1.0, "relevance": 1.0, "verdict": "pass"})
+    result, _ = _run_with_fake_llm(
+        judge_raw,
+        question="Tell me about this claim",
+        answer="Claim CLM‑1005 belongs to Dmitry Sokolov.",  # U+2011 non-breaking hyphen
+        tool_outputs=tool_outputs,
+    )
+    assert result["verdict"] == "pass", "a typographic dash variant must still match the real id"
+    print("test_unicode_dash_in_answer_does_not_cause_a_false_flag: PASS ->", result)
+
+
+def test_system_prompt_distinguishes_recommendation_from_confirmed_decision():
+    """request_human_approval's output is the agent's own proposal, not a
+    settled fact; human_decision is the real, human-confirmed outcome. The
+    judge's system prompt must spell out that distinction so it doesn't
+    treat an unconfirmed recommendation as equivalent to a final status."""
+    assert "request_human_approval" in judge.JUDGE_SYSTEM_PROMPT
+    assert "human_decision" in judge.JUDGE_SYSTEM_PROMPT
+    assert "own proposed" in judge.JUDGE_SYSTEM_PROMPT.lower() or "own proposed" in judge.JUDGE_SYSTEM_PROMPT
+    print("test_system_prompt_distinguishes_recommendation_from_confirmed_decision: PASS")
+
+
 def test_import_judge_requires_no_groq_api_key(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     import importlib
@@ -174,4 +272,9 @@ if __name__ == "__main__":
     test_json_wrapped_in_markdown_fence_still_parses()
     test_llm_call_raising_is_caught_not_crashed()
     test_prompt_actually_contains_real_tool_outputs_not_a_placeholder()
+    test_hallucinated_claim_id_forces_fail_even_if_llm_wrongly_says_pass()
+    test_real_history_entry_claim_id_is_not_flagged()
+    test_claim_id_from_call_args_only_is_not_flagged()
+    test_unicode_dash_in_answer_does_not_cause_a_false_flag()
+    test_system_prompt_distinguishes_recommendation_from_confirmed_decision()
     print("\nAll judge.py tests passed.")

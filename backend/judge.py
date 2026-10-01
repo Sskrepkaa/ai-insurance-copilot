@@ -7,7 +7,8 @@ judge never sees the agent's reasoning/tool-calling process, only:
   - the employee's question (or resume context, for /resume)
   - the agent's final answer text
   - the raw tool_outputs the agent actually retrieved (get_claim_details,
-    check_fraud_risk, get_customer_history)
+    check_fraud_risk, get_customer_history, plus request_human_approval and
+    human_decision - see the system prompt for how those last two differ)
 
 The core check is groundedness: does every factual claim in the answer
 (numbers, names, risk scores, history entries, dates, statuses...) trace
@@ -18,6 +19,15 @@ General reasoning/insurance terminology that doesn't assert a new fact
 (e.g. "this looks like a routine auto claim", "please review before
 approving") is fine and shouldn't hurt groundedness.
 
+On top of the LLM's own judgment, `judge_response()` also runs a cheap,
+deterministic check: every "CLM-####"-shaped id mentioned in the answer
+must appear somewhere in tool_outputs (in any call's args or output,
+recursively - e.g. inside a get_customer_history list entry). If the
+answer mentions an id that isn't grounded anywhere in tool_outputs, the
+verdict is forced to "fail" regardless of what the LLM judge said - this
+catches the specific, high-confidence case of an outright invented claim
+id even if the LLM judge itself gets fooled.
+
 Like agent.py's ChatGroq usage, the LLM client is constructed lazily -
 `import judge` must work with no GROQ_API_KEY set; the key is only needed
 once `judge_response(...)` actually runs.
@@ -27,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +56,20 @@ JUDGE_SYSTEM_PROMPT = (
     "final answer, and tool_outputs: a list of every tool call the copilot "
     "made, each with the exact arguments it was called with (\"args\") and "
     "the exact, real data it returned (\"output\") - from "
-    "get_claim_details, check_fraud_risk, get_customer_history.\n\n"
+    "get_claim_details, check_fraud_risk, get_customer_history, and "
+    "sometimes two special entries:\n"
+    "  - \"request_human_approval\": this is the AGENT'S OWN PROPOSED "
+    "recommendation (e.g. \"reject\"), not a confirmed fact about the "
+    "claim. The answer saying something like \"I recommend rejecting this "
+    "claim, pending your confirmation\" is fine. But if the answer instead "
+    "asserts the decision is already made/final (e.g. \"this claim has "
+    "been rejected\") and tool_outputs has NO \"human_decision\" entry, "
+    "that is an ungrounded/fabricated status claim and must lower "
+    "groundedness.\n"
+    "  - \"human_decision\": this IS a confirmed fact - the real outcome "
+    "an actual human expert entered via the dashboard's Approve/Reject "
+    "buttons (approved: bool, reason: str). Stating the claim's final "
+    "outcome is grounded when this entry is present.\n\n"
     "Score two criteria, each from 0.0 to 1.0:\n\n"
     "1. groundedness - does the answer contain ONLY facts that are "
     "actually present in tool_outputs (either in a call's \"args\" or its "
@@ -109,6 +133,70 @@ def _get_judge_llm():
 
         _judge_llm = ChatGroq(model=MODEL_NAME, temperature=0)
     return _judge_llm
+
+
+# Matches "CLM-1001"-shaped ids. The dash covers plain ASCII "-" plus the
+# Unicode dash variants an LLM sometimes substitutes in prose (e.g.
+# "CLM‑1001" with U+2011 non-breaking hyphen) so formatting quirks
+# don't let a real, grounded id slip past the check as "not found".
+_CLAIM_ID_PATTERN = re.compile(r"CLM[-‐‑‒–—−]\d{3,6}", re.IGNORECASE)
+_DASH_VARIANTS = re.compile(r"[‐‑‒–—−]")
+
+
+def _extract_claim_ids(text: Any) -> set[str]:
+    if not isinstance(text, str):
+        return set()
+    return {_DASH_VARIANTS.sub("-", m).upper() for m in _CLAIM_ID_PATTERN.findall(text)}
+
+
+def _iter_strings(value: Any):
+    """Walk a (possibly nested) tool_outputs value and yield every string
+    in it, so claim ids inside e.g. a get_customer_history list entry are
+    found just as readily as ones in a top-level field."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _iter_strings(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _iter_strings(v)
+
+
+def _grounded_claim_ids(tool_outputs: list[dict]) -> set[str]:
+    """Every claim id mentioned anywhere in tool_outputs (args or output,
+    at any nesting depth) - the full set of ids the answer is allowed to
+    reference."""
+    ids: set[str] = set()
+    for entry in tool_outputs or []:
+        for s in _iter_strings(entry):
+            ids |= _extract_claim_ids(s)
+    return ids
+
+
+def _apply_claim_id_check(result: dict, answer: str, tool_outputs: list[dict]) -> dict:
+    """Deterministic safety net: force verdict="fail" if the answer
+    mentions a claim id that doesn't appear anywhere in tool_outputs. This
+    runs regardless of what the LLM judge concluded (even on a parse
+    failure/"error" result) because it doesn't depend on the LLM at all -
+    it exists specifically for the case where the LLM judge itself misses
+    an outright invented id."""
+    answer_ids = _extract_claim_ids(answer)
+    if not answer_ids:
+        return result
+
+    hallucinated = answer_ids - _grounded_claim_ids(tool_outputs)
+    if not hallucinated:
+        return result
+
+    result = dict(result)
+    groundedness = result.get("groundedness")
+    result["groundedness"] = 0.0 if groundedness is None else min(groundedness, 0.2)
+    result["verdict"] = "fail"
+    extra = f"[deterministic check] answer mentions claim id(s) not found in tool_outputs: {sorted(hallucinated)}"
+    existing_reason = result.get("reason")
+    result["reason"] = f"{existing_reason} {extra}" if existing_reason else extra
+    return result
 
 
 def _fallback(reason: str = "judge output could not be parsed") -> dict:
@@ -214,7 +302,11 @@ def judge_response(question: str, answer: str, tool_outputs: list[dict]) -> dict
         raw = response.content if hasattr(response, "content") else str(response)
         if not isinstance(raw, str):
             raw = str(raw)
+        result = _parse_judge_output(raw)
     except Exception as exc:  # noqa: BLE001 - judge must never crash the request
-        return _fallback(f"judge LLM call failed: {exc}")
+        result = _fallback(f"judge LLM call failed: {exc}")
 
-    return _parse_judge_output(raw)
+    # Applied even when the LLM call/parse failed: it's a pure text/data
+    # check that doesn't need the LLM judge to have worked at all, so it
+    # still catches an outright invented claim id as a last resort.
+    return _apply_claim_id_check(result, answer, tool_outputs)

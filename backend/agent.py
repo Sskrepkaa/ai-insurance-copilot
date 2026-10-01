@@ -82,6 +82,12 @@ SYSTEM_PROMPT = (
     "customer's claim history. Use the tools whenever you need facts instead "
     "of guessing. Keep answers short and concrete, and mention the "
     "fraud risk_score and level when you looked it up.\n\n"
+    "If get_customer_history returns an empty list, or doesn't contain the "
+    "specific claim/date/status the employee asked about, say explicitly "
+    "that there is no such history - do NOT invent a claim id, date, or "
+    "outcome that isn't literally present in the tool's output. The same "
+    "goes for every other tool: never state a specific fact (an id, "
+    "amount, date, status, name) that didn't come from a tool result.\n\n"
     f"If, after checking fraud risk, the risk_score is above "
     f"{FRAUD_RISK_THRESHOLD} AND you are about to recommend approving or "
     f"rejecting the claim to the employee, you MUST call the "
@@ -120,10 +126,20 @@ def check_fraud_risk(claim_id: str) -> dict:
 
 
 @tool
-def get_customer_history(client: str) -> list:
+def get_customer_history(client: str) -> dict:
     """Get the list of past claims/outcomes for a customer by their full
-    name, e.g. "Ivan Petrov"."""
-    return backend_tools.get_customer_history(client)
+    name, e.g. "Ivan Petrov". Returns {"history": [...]} - an empty
+    "history" list means this customer has no past claims on record; say
+    so explicitly rather than inventing one."""
+    # Wrapped in a dict rather than returned as a bare list: langgraph's
+    # ToolNode (msg_content_output) decides whether to JSON-serialize a
+    # list result by checking `all(... for x in output)`, which is
+    # vacuously True for an EMPTY list - so an empty list comes out as
+    # raw content=[] instead of the string "[]", and Groq's API then
+    # rejects the message ("minimum number of items is 1"). A dict never
+    # hits that list branch at all, empty or not, so this sidesteps the
+    # bug entirely rather than special-casing the empty case.
+    return {"history": backend_tools.get_customer_history(client)}
 
 
 @tool
