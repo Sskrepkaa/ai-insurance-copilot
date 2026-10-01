@@ -193,6 +193,220 @@ def test_human_check_builds_question_from_the_approval_payload_and_records_decis
     assert "looks suspicious" in recorded.content
 
 
+def _resolved_approval_round(call_id_prefix: str, claim_id: str, risk_score: float, recommendation: str, approved: bool, reason: str) -> list:
+    """Build the message sequence for one full, already-resolved
+    request_human_approval round: fraud check -> approval request ->
+    (interrupt/resume happened) -> "Expert decision recorded" note."""
+    return [
+        AIMessage(
+            content="",
+            tool_calls=[_tool_call(f"{call_id_prefix}a", "check_fraud_risk", {"claim_id": claim_id})],
+        ),
+        _tool_message(f"{call_id_prefix}a", "check_fraud_risk", {"risk_score": risk_score, "level": "high"}),
+        AIMessage(
+            content="",
+            tool_calls=[
+                _tool_call(
+                    f"{call_id_prefix}b",
+                    "request_human_approval",
+                    {"claim_id": claim_id, "risk_score": risk_score, "recommendation": recommendation},
+                )
+            ],
+        ),
+        _tool_message(
+            f"{call_id_prefix}b",
+            "request_human_approval",
+            {"claim_id": claim_id, "risk_score": risk_score, "recommendation": recommendation},
+        ),
+        HumanMessage(content=f"Expert decision recorded: approved={approved}, reason={reason!r}"),
+    ]
+
+
+def test_route_after_tools_treats_repeated_identical_approval_request_as_already_decided():
+    """Regression test: after a decision is confirmed, human_check now
+    loops back to "agent" (not END) so the model can compose a final
+    answer - but if the model then (incorrectly) calls
+    request_human_approval AGAIN for the exact same claim_id +
+    recommendation, that must route to "already_decided", not trigger a
+    second interrupt via "human_check"."""
+    messages = [
+        HumanMessage(content="Проверь этот claim на мошенничество"),
+        *_resolved_approval_round("r1", "CLM-1003", 0.925, "reject", True, "проверено вручную"),
+        # Model ignores the "Expert decision recorded" note and asks again,
+        # for the exact same claim_id + recommendation.
+        AIMessage(
+            content="",
+            tool_calls=[
+                _tool_call(
+                    "r2b",
+                    "request_human_approval",
+                    {"claim_id": "CLM-1003", "risk_score": 0.925, "recommendation": "reject"},
+                )
+            ],
+        ),
+        _tool_message(
+            "r2b",
+            "request_human_approval",
+            {"claim_id": "CLM-1003", "risk_score": 0.925, "recommendation": "reject"},
+        ),
+    ]
+    assert agent.route_after_tools({"messages": messages}) == "already_decided"
+
+
+def test_route_after_tools_allows_a_new_distinct_recommendation_for_same_claim():
+    """A materially different recommendation for the same claim (e.g. the
+    agent now recommends "approve" instead of the previously-confirmed
+    "reject") is a genuinely new decision point, not a duplicate - it must
+    still reach human_check."""
+    messages = [
+        HumanMessage(content="Проверь этот claim на мошенничество"),
+        *_resolved_approval_round("r1", "CLM-1003", 0.925, "reject", False, "отклонено"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                _tool_call(
+                    "r2b",
+                    "request_human_approval",
+                    {"claim_id": "CLM-1003", "risk_score": 0.4, "recommendation": "approve"},
+                )
+            ],
+        ),
+        _tool_message(
+            "r2b",
+            "request_human_approval",
+            {"claim_id": "CLM-1003", "risk_score": 0.4, "recommendation": "approve"},
+        ),
+    ]
+    assert agent.route_after_tools({"messages": messages}) == "human_check"
+
+
+def test_route_after_tools_allows_a_fresh_request_for_a_different_claim():
+    """A request_human_approval for a DIFFERENT claim_id than the one
+    already confirmed must not be suppressed - it's an unrelated decision."""
+    messages = [
+        HumanMessage(content="Проверь этот claim на мошенничество"),
+        *_resolved_approval_round("r1", "CLM-1003", 0.925, "reject", True, "проверено вручную"),
+        HumanMessage(content="А теперь проверь CLM-1006"),
+        AIMessage(
+            content="",
+            tool_calls=[_tool_call("r2a", "check_fraud_risk", {"claim_id": "CLM-1006"})],
+        ),
+        _tool_message("r2a", "check_fraud_risk", {"risk_score": 0.975, "level": "high"}),
+        AIMessage(
+            content="",
+            tool_calls=[
+                _tool_call(
+                    "r2b",
+                    "request_human_approval",
+                    {"claim_id": "CLM-1006", "risk_score": 0.975, "recommendation": "reject"},
+                )
+            ],
+        ),
+        _tool_message(
+            "r2b",
+            "request_human_approval",
+            {"claim_id": "CLM-1006", "risk_score": 0.975, "recommendation": "reject"},
+        ),
+    ]
+    assert agent.route_after_tools({"messages": messages}) == "human_check"
+
+
+def test_already_decided_never_calls_interrupt_and_references_the_existing_decision(monkeypatch):
+    """already_decided() must NOT call interrupt() at all (that's the whole
+    point - no second pause for the same ask) and must inject a note the
+    model can use to just reference the existing decision."""
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("already_decided() must never call interrupt()")
+
+    monkeypatch.setattr(agent, "interrupt", fail_if_called)
+
+    messages = [
+        HumanMessage(content="Проверь этот claim на мошенничество"),
+        *_resolved_approval_round("r1", "CLM-1003", 0.925, "reject", True, "проверено вручную"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                _tool_call(
+                    "r2b",
+                    "request_human_approval",
+                    {"claim_id": "CLM-1003", "risk_score": 0.925, "recommendation": "reject"},
+                )
+            ],
+        ),
+        _tool_message(
+            "r2b",
+            "request_human_approval",
+            {"claim_id": "CLM-1003", "risk_score": 0.925, "recommendation": "reject"},
+        ),
+    ]
+
+    result = agent.already_decided({"messages": messages})
+    note = result["messages"][0]
+    assert isinstance(note, HumanMessage)
+    assert "CLM-1003" in note.content
+    assert "already" in note.content.lower()
+    assert "approved=True" in note.content
+
+
+def test_repeated_duplicate_requests_stay_bounded_not_escalating():
+    """Simulates a model that keeps re-requesting the same already-decided
+    approval across several rounds: route_after_tools must keep returning
+    "already_decided" every time (never "human_check"), so the loop never
+    needs a second human round-trip for the same confirmed ask."""
+    messages = [
+        HumanMessage(content="Проверь этот claim на мошенничество"),
+        *_resolved_approval_round("r1", "CLM-1003", 0.925, "reject", True, "проверено вручную"),
+    ]
+    for i in range(5):
+        messages += [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _tool_call(
+                        f"loop{i}",
+                        "request_human_approval",
+                        {"claim_id": "CLM-1003", "risk_score": 0.925, "recommendation": "reject"},
+                    )
+                ],
+            ),
+            _tool_message(
+                f"loop{i}",
+                "request_human_approval",
+                {"claim_id": "CLM-1003", "risk_score": 0.925, "recommendation": "reject"},
+            ),
+        ]
+        assert agent.route_after_tools({"messages": messages}) == "already_decided", f"iteration {i}"
+        # already_decided() would append its note here in the real graph;
+        # simulate that so the next loop iteration's history is realistic.
+        messages.append(HumanMessage(content=f"Note: claim CLM-1003 already has a recorded expert decision (iteration {i})"))
+
+
+def test_extract_tool_outputs_surfaces_recorded_decision_for_later_chat_calls():
+    """Regression test: the human_decision fact used to be injected ad hoc
+    only inside main.py's /resume handler, so a LATER /chat call in the
+    same thread that referenced an already-recorded decision had no way to
+    see it and got flagged as fabricating "approved=True". Now
+    extract_tool_outputs() itself picks up the "Expert decision recorded"
+    HumanMessage from anywhere in the thread's history."""
+    messages = [
+        HumanMessage(content="Проверь этот claim на мошенничество"),
+        *_resolved_approval_round("r1", "CLM-1003", 0.925, "reject", True, "проверено вручную"),
+        HumanMessage(content="Что в итоге решили по этому claim?"),
+    ]
+    outputs = agent.extract_tool_outputs(messages)
+    decision_entries = [o for o in outputs if o["tool"] == "human_decision"]
+    assert len(decision_entries) == 1, outputs
+    assert decision_entries[0]["output"] == {"approved": True, "reason": "проверено вручную"}
+
+
+def test_extract_tool_outputs_ignores_unrelated_human_messages():
+    """A plain user question must not be mistaken for a decision record."""
+    messages = [HumanMessage(content="Проверь этот claim на мошенничество")]
+    outputs = agent.extract_tool_outputs(messages)
+    assert outputs == []
+
+
 if __name__ == "__main__":
     import sys
 
@@ -201,6 +415,12 @@ if __name__ == "__main__":
         test_route_after_tools_triggers_on_explicit_approval_request,
         test_route_after_tools_does_not_trigger_on_plain_fraud_check_without_recommendation,
         test_should_continue_routes_to_tools_then_end,
+        test_route_after_tools_treats_repeated_identical_approval_request_as_already_decided,
+        test_route_after_tools_allows_a_new_distinct_recommendation_for_same_claim,
+        test_route_after_tools_allows_a_fresh_request_for_a_different_claim,
+        test_repeated_duplicate_requests_stay_bounded_not_escalating,
+        test_extract_tool_outputs_surfaces_recorded_decision_for_later_chat_calls,
+        test_extract_tool_outputs_ignores_unrelated_human_messages,
     ]
     failures = 0
     for t in tests:
@@ -216,11 +436,15 @@ if __name__ == "__main__":
         def setattr(self, obj, name, value):
             setattr(obj, name, value)
 
-    try:
-        test_human_check_builds_question_from_the_approval_payload_and_records_decision(_MonkeyPatch())
-        print(f"OK   test_human_check_builds_question_from_the_approval_payload_and_records_decision")
-    except AssertionError as e:
-        failures += 1
-        print(f"FAIL test_human_check_builds_question_from_the_approval_payload_and_records_decision: {e}")
+    for monkeypatch_test in [
+        test_human_check_builds_question_from_the_approval_payload_and_records_decision,
+        test_already_decided_never_calls_interrupt_and_references_the_existing_decision,
+    ]:
+        try:
+            monkeypatch_test(_MonkeyPatch())
+            print(f"OK   {monkeypatch_test.__name__}")
+        except AssertionError as e:
+            failures += 1
+            print(f"FAIL {monkeypatch_test.__name__}: {e}")
 
     sys.exit(1 if failures else 0)

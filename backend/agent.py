@@ -51,8 +51,10 @@ re-triggered an Approve/Reject interrupt. The fix is twofold:
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -257,24 +259,123 @@ def _parse_tool_message_content(msg: ToolMessage) -> dict | None:
     return None
 
 
+def _current_approval_request(messages) -> tuple[ToolMessage | None, dict]:
+    """Find the request_human_approval ToolMessage in the *current*
+    tool-call round (if any) and its parsed payload."""
+    last_batch = _last_tool_batch(messages)
+    approval_msg = next(
+        (m for m in last_batch if isinstance(m, ToolMessage) and m.name == REQUEST_APPROVAL_TOOL_NAME),
+        None,
+    )
+    payload = (_parse_tool_message_content(approval_msg) if approval_msg else None) or {}
+    return approval_msg, payload
+
+
+def _message_index(messages, target) -> int:
+    """Index of `target` in `messages` by identity (not equality, since two
+    distinct messages can have equal content)."""
+    for i, m in enumerate(messages):
+        if m is target:
+            return i
+    return len(messages)
+
+
+def _confirmed_decisions(messages) -> dict[str, dict]:
+    """Scan `messages` for (request_human_approval -> immediately followed,
+    later in the list, by human_check's "Expert decision recorded..."
+    HumanMessage) pairs, keyed by claim_id, keeping the most recent
+    confirmation per claim.
+
+    Used to detect when the agent is about to re-request approval for a
+    claim_id + recommendation that was already confirmed earlier in this
+    same thread, so route_after_tools can skip interrupting again for the
+    exact same ask (see its docstring for why this matters)."""
+    confirmed: dict[str, dict] = {}
+    pending_payload: dict | None = None
+    for msg in messages:
+        if isinstance(msg, ToolMessage) and msg.name == REQUEST_APPROVAL_TOOL_NAME:
+            pending_payload = _parse_tool_message_content(msg) or {}
+        elif (
+            pending_payload is not None
+            and isinstance(msg, HumanMessage)
+            and isinstance(msg.content, str)
+            and msg.content.startswith("Expert decision recorded")
+        ):
+            claim_id = pending_payload.get("claim_id")
+            if claim_id is not None:
+                confirmed[claim_id] = {
+                    "recommendation": pending_payload.get("recommendation"),
+                    "decision_message": msg.content,
+                }
+            pending_payload = None
+    return confirmed
+
+
 def route_after_tools(state: MessagesState) -> str:
-    """After the tools node runs, pause for human-in-the-loop only if the
-    agent just (this round) explicitly called request_human_approval -
-    never merely because check_fraud_risk returned a high score, and never
-    because of something called in an earlier turn. Otherwise loop back to
-    the agent so it can use the tool result(s) to keep answering."""
-    last_batch = _last_tool_batch(state["messages"])
-    if any(
-        isinstance(m, ToolMessage) and m.name == REQUEST_APPROVAL_TOOL_NAME
-        for m in last_batch
-    ):
-        return "human_check"
-    return "agent"
+    """After the tools node runs, decide where to go next:
+
+    - "agent": no request_human_approval call this round - just loop back
+      with the tool result(s).
+    - "already_decided": the agent re-requested approval for a claim_id +
+      recommendation pair that was ALREADY confirmed earlier in this same
+      thread (e.g. it misread the "Expert decision recorded" note and
+      asked again, or a complex multi-claim dialog confused it). Skip
+      interrupting a second time for the exact same ask - remind it of the
+      existing decision instead.
+    - "human_check": a genuinely new approval request (new claim_id, or a
+      materially different recommendation for the same claim) - pause for
+      a real human decision.
+
+    Never merely because check_fraud_risk returned a high score, and never
+    because of something called in an earlier turn - see the module
+    docstring's "HITL trigger design" note for the turn-scoping rationale.
+    """
+    messages = state["messages"]
+    approval_msg, payload = _current_approval_request(messages)
+    if approval_msg is None:
+        return "agent"
+
+    prior = _confirmed_decisions(messages[: _message_index(messages, approval_msg)])
+    already = prior.get(payload.get("claim_id"))
+    if already is not None and already.get("recommendation") == payload.get("recommendation"):
+        return "already_decided"
+    return "human_check"
+
+
+def already_decided(state: MessagesState) -> dict:
+    """Reached when route_after_tools detects a re-request for a claim_id +
+    recommendation pair that's already been confirmed in this thread (see
+    its docstring). Never calls interrupt() - just tells the agent about
+    the existing decision so it stops asking and uses it in its answer.
+    This is what keeps a model that ignores the "don't ask again" system
+    prompt instruction from re-triggering an interrupt (and, via main.py's
+    /resume now checking for __interrupt__ too, from silently stranding a
+    second one) for a decision that's already settled.
+    """
+    messages = state["messages"]
+    approval_msg, payload = _current_approval_request(messages)
+    prior = _confirmed_decisions(messages[: _message_index(messages, approval_msg)])
+    existing = prior.get(payload.get("claim_id"), {})
+    return {
+        "messages": [
+            HumanMessage(
+                content=(
+                    f"Note: claim {payload.get('claim_id')} already has a recorded "
+                    f"expert decision for a '{payload.get('recommendation')}' "
+                    f"recommendation - {existing.get('decision_message', 'no details available')}. "
+                    "Do not ask for approval again for this - just reference the "
+                    "existing decision in your answer."
+                )
+            )
+        ]
+    }
 
 
 def human_check(state: MessagesState) -> dict:
-    """HITL node, reached only via an explicit request_human_approval call
-    in the current tool-call round (see route_after_tools). Pause with
+    """HITL node, reached only via a genuinely new request_human_approval
+    call in the current tool-call round (see route_after_tools - a
+    re-request for an already-confirmed claim_id + recommendation is
+    routed to already_decided instead, never here). Pause with
     `interrupt(...)` and surface the agent's recommendation to the human
     expert.
 
@@ -284,13 +385,7 @@ def human_check(state: MessagesState) -> dict:
     raising, and we record it as a HumanMessage before looping back to the
     agent so it can compose a final answer that reflects the decision.
     """
-    last_batch = _last_tool_batch(state["messages"])
-    approval_msg = next(
-        (m for m in last_batch if isinstance(m, ToolMessage) and m.name == REQUEST_APPROVAL_TOOL_NAME),
-        None,
-    )
-    payload = _parse_tool_message_content(approval_msg) if approval_msg else None
-    payload = payload or {}
+    _approval_msg, payload = _current_approval_request(state["messages"])
 
     question = (
         f"Risk score {payload.get('risk_score')} detected. The agent "
@@ -320,13 +415,17 @@ builder = StateGraph(MessagesState)
 builder.add_node("agent", call_model)
 builder.add_node("tools", ToolNode(all_tools))
 builder.add_node("human_check", human_check)
+builder.add_node("already_decided", already_decided)
 
 builder.add_edge(START, "agent")
 builder.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
 builder.add_conditional_edges(
-    "tools", route_after_tools, {"human_check": "human_check", "agent": "agent"}
+    "tools",
+    route_after_tools,
+    {"human_check": "human_check", "agent": "agent", "already_decided": "already_decided"},
 )
 builder.add_edge("human_check", "agent")
+builder.add_edge("already_decided", "agent")
 
 # A single long-lived sqlite connection + SqliteSaver for the whole process.
 # check_same_thread=False + SqliteSaver's internal lock make this safe to
@@ -361,12 +460,32 @@ def extract_interrupt_question(interrupt_payload) -> str:
     return str(value)
 
 
+_DECISION_MESSAGE_RE = re.compile(r"^Expert decision recorded: approved=(True|False|None), reason=(.*)$")
+
+
+def _parse_decision_message(content: str) -> dict | None:
+    """Parse a human_check()-authored "Expert decision recorded:
+    approved=X, reason='Y'" HumanMessage back into {"approved": ..,
+    "reason": ..}, or None if `content` isn't one of those messages."""
+    m = _DECISION_MESSAGE_RE.match(content)
+    if not m:
+        return None
+    approved_str, reason_repr = m.groups()
+    approved = {"True": True, "False": False, "None": None}[approved_str]
+    try:
+        reason = ast.literal_eval(reason_repr)
+    except (ValueError, SyntaxError):
+        reason = reason_repr
+    return {"approved": approved, "reason": reason}
+
+
 def extract_tool_outputs(messages) -> list[dict]:
     """Collect every ToolMessage in `messages` (the graph's full message
     history for this thread, as returned by `graph.invoke(...)["messages"]`
     or `graph.get_state(config).values["messages"]`) as
     `[{"tool": <tool name>, "args": <call arguments>, "output": <parsed JSON
-    or raw content>}, ...]`.
+    or raw content>}, ...]`, PLUS a synthetic `{"tool": "human_decision", ...}`
+    entry for every recorded expert decision in the thread (see below).
 
     `args` matters as much as `output` for the judge: e.g. check_fraud_risk
     only *returns* {"risk_score": ..., "level": ...} - the claim_id it was
@@ -376,6 +495,18 @@ def extract_tool_outputs(messages) -> list[dict]:
     the id the tool was invoked with - a false positive. We recover the
     arguments by matching each ToolMessage.tool_call_id back to the
     `tool_calls` entry with the same id on the preceding AIMessage.
+
+    The human_decision entries matter for the same reason: a human's
+    approve/reject decision isn't a tool call at all (it comes from
+    human_check()'s interrupt()/resume, recorded as a plain HumanMessage),
+    so without surfacing it here too, a LATER /chat answer in the same
+    thread that references an already-recorded decision (e.g. "the expert
+    approved this claim") would have that fact flagged as fabricated by
+    the judge - it has no other way to see it. Previously this was
+    injected ad hoc only inside main.py's /resume handler, which fixed
+    /resume's own judge call but left every later /chat call in the thread
+    still blind to the decision; parsing it here instead means every
+    caller (both endpoints) gets it automatically.
 
     Used by main.py to feed judge.judge_response() the real data the
     agent's tools returned, per 03_prompt_ai_judge_agent.md. `ToolNode`
@@ -395,23 +526,27 @@ def extract_tool_outputs(messages) -> list[dict]:
 
     outputs = []
     for msg in messages:
-        if not isinstance(msg, ToolMessage):
-            continue
-        content = msg.content
-        if isinstance(content, str):
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError:
+        if isinstance(msg, ToolMessage):
+            content = msg.content
+            if isinstance(content, str):
+                try:
+                    parsed = json.loads(content)
+                except json.JSONDecodeError:
+                    parsed = content
+            else:
                 parsed = content
-        else:
-            parsed = content
-        outputs.append(
-            {
-                "tool": msg.name,
-                "args": call_args_by_id.get(getattr(msg, "tool_call_id", None), {}),
-                "output": parsed,
-            }
-        )
+            outputs.append(
+                {
+                    "tool": msg.name,
+                    "args": call_args_by_id.get(getattr(msg, "tool_call_id", None), {}),
+                    "output": parsed,
+                }
+            )
+        elif isinstance(msg, HumanMessage) and isinstance(msg.content, str):
+            decision = _parse_decision_message(msg.content)
+            if decision is not None:
+                outputs.append({"tool": "human_decision", "args": {}, "output": decision})
+
     return outputs
 
 
