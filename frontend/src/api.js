@@ -24,6 +24,11 @@ export async function fetchClaimDetails(claimId) {
   return parseJsonOrThrow(res, "Loading claim details");
 }
 
+export async function fetchChatHistory(claimId) {
+  const res = await fetch(`${API_BASE}/chat/${claimId}/history`);
+  return parseJsonOrThrow(res, "Loading chat history");
+}
+
 export async function sendMessage(claimId, message) {
   const res = await fetch(`${API_BASE}/chat`, {
     method: "POST",

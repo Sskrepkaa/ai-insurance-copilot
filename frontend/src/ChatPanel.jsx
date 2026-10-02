@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { sendMessage, resumeDecision } from "./api";
+import { sendMessage, resumeDecision, fetchChatHistory } from "./api";
 
 let messageIdCounter = 0;
 function nextMessageId() {
@@ -35,14 +35,56 @@ export default function ChatPanel({ claimId, claim, detailsLoading, detailsError
   const [sending, setSending] = useState(false);
   const [resolvingId, setResolvingId] = useState(null);
   const [chatError, setChatError] = useState(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState(null);
   const bottomRef = useRef(null);
 
-  // Reset the conversation whenever a different claim is selected.
+  // Reset the conversation whenever a different claim is selected, then
+  // restore whatever the backend's checkpointer already remembers for this
+  // claim's thread - the agent keeps full history server-side, so reopening
+  // a claim shouldn't show an empty chat if one already happened.
   useEffect(() => {
+    let cancelled = false;
     setMessages([]);
     setInput("");
     setChatError(null);
     setResolvingId(null);
+    setHistoryError(null);
+    setHistoryLoading(true);
+
+    fetchChatHistory(claimId)
+      .then((data) => {
+        if (cancelled) return;
+        const restored = (data.messages || []).map((m) => ({
+          id: nextMessageId(),
+          role: m.role === "assistant" ? "agent" : "user",
+          text: m.text,
+        }));
+        // A claim left mid-interrupt (the employee navigated away before
+        // clicking Approve/Reject) comes back with pending_interrupt set -
+        // render it as the live HITL card, not a plain message, so the
+        // decision can still be made.
+        if (data.pending_interrupt) {
+          restored.push({
+            id: nextMessageId(),
+            role: "interrupt",
+            question: data.pending_interrupt.question,
+            threadId: data.pending_interrupt.thread_id,
+            resolved: false,
+          });
+        }
+        setMessages(restored);
+      })
+      .catch((err) => {
+        if (!cancelled) setHistoryError(err.message || "Failed to load chat history.");
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [claimId]);
 
   useEffect(() => {
@@ -55,7 +97,7 @@ export default function ChatPanel({ claimId, claim, detailsLoading, detailsError
 
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text || sending || historyLoading) return;
 
     appendMessage({ role: "user", text });
     setInput("");
@@ -145,7 +187,15 @@ export default function ChatPanel({ claimId, claim, detailsLoading, detailsError
       </div>
 
       <div className="chat-panel__messages">
-        {messages.length === 0 && !sending && (
+        {historyLoading && (
+          <p className="chat-panel__status">Loading conversation...</p>
+        )}
+
+        {historyError && (
+          <p className="chat-panel__status chat-panel__status--error">{historyError}</p>
+        )}
+
+        {!historyLoading && !historyError && messages.length === 0 && !sending && (
           <p className="chat-panel__empty">
             Ask the AI copilot about this claim, e.g. "Check this claim for fraud".
           </p>
@@ -224,13 +274,13 @@ export default function ChatPanel({ claimId, claim, detailsLoading, detailsError
           onKeyDown={handleKeyDown}
           placeholder="Type a message to the AI copilot..."
           rows={2}
-          disabled={sending}
+          disabled={sending || historyLoading}
         />
         <button
           type="button"
           className="btn btn--send"
           onClick={handleSend}
-          disabled={sending || !input.trim()}
+          disabled={sending || historyLoading || !input.trim()}
         >
           Send
         </button>

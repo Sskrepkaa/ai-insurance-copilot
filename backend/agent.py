@@ -600,3 +600,38 @@ def extract_original_question(messages) -> str:
         if isinstance(msg, HumanMessage) and isinstance(msg.content, str) and msg.content:
             return msg.content
     return ""
+
+
+def extract_chat_history(messages) -> list[dict]:
+    """Reduce a thread's full message list down to what the frontend
+    dashboard should display when a claim is reopened: just the real
+    back-and-forth between the employee and the agent, as
+    `[{"role": "user"|"assistant", "text": "..."}, ...]`.
+
+    Filters out everything that isn't a real turn:
+    - ToolMessages (tool calls/results - internal plumbing)
+    - AIMessages with no text content (pure tool-call requests, e.g. the
+      one that calls check_fraud_risk - nothing for a human to read)
+    - the synthetic HumanMessages human_check()/already_decided() inject
+      ("Expert decision recorded: ...", "Note: claim ... already has a
+      recorded expert decision ...") - these are agent-internal bookkeeping,
+      not something the employee actually typed
+
+    Used by GET /chat/{claim_id}/history so switching claims on the
+    dashboard and coming back doesn't lose the conversation that's already
+    sitting in the checkpointer.
+    """
+    history = []
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            content = msg.content
+            if not isinstance(content, str) or not content:
+                continue
+            if content.startswith("Expert decision recorded") or content.startswith("Note: claim"):
+                continue
+            history.append({"role": "user", "text": content})
+        elif isinstance(msg, AIMessage):
+            content = msg.content
+            if isinstance(content, str) and content:
+                history.append({"role": "assistant", "text": content})
+    return history

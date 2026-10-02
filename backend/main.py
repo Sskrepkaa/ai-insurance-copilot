@@ -74,6 +74,43 @@ def get_claim(claim_id: str):
     return claim
 
 
+@app.get("/chat/{claim_id}/history")
+def chat_history(claim_id: str):
+    """Return the persisted conversation for this claim's agent thread, so
+    the frontend can restore it when the claim is reopened instead of
+    showing an empty chat (the checkpointer already remembers everything -
+    this was purely a frontend gap, not a backend one).
+
+    Response: {"messages": [{"role": "user"|"assistant", "text": ...}],
+    "pending_interrupt": null | {"type": "interrupt", "question": ...,
+    "thread_id": ...}}. `pending_interrupt` mirrors the exact shape /chat
+    and /resume return when they pause, so the frontend can feed it
+    through the same Approve/Reject rendering path - it's non-null when
+    the thread is sitting at human_check waiting on a decision the
+    employee never submitted (they navigated away mid-interrupt).
+
+    A claim_id that was never chatted on has no checkpoint at all, not an
+    error: get_state() just returns empty values, which comes back here as
+    an empty history and no pending interrupt.
+    """
+    config = {"configurable": {"thread_id": claim_id}}
+    state = agent.graph.get_state(config)
+    messages = state.values.get("messages", [])
+
+    pending_interrupt = None
+    if state.interrupts:
+        pending_interrupt = {
+            "type": "interrupt",
+            "question": agent.extract_interrupt_question(state.interrupts),
+            "thread_id": claim_id,
+        }
+
+    return {
+        "messages": agent.extract_chat_history(messages),
+        "pending_interrupt": pending_interrupt,
+    }
+
+
 class ChatRequest(BaseModel):
     claim_id: str
     message: str

@@ -46,6 +46,18 @@ Response (если агент остановился и ждёт решения 
 Body: {"thread_id": "CLM-1001", "approved": true, "reason": "проверено вручную"}
 Response: {"type": "answer", "text": "Claim одобрен. ...", "judge_score": {...}}
 
+### GET /chat/{claim_id}/history
+Добавлено позже для сохранения истории чата между переключениями claims на фронтенде
+(backend и так хранит всё в LangGraph checkpointer per thread_id = claim_id - это чисто
+чтение уже имеющегося состояния, без изменения графа).
+Response:
+{"messages": [{"role": "user"|"assistant", "text": "..."}, ...],
+ "pending_interrupt": null | {"type": "interrupt", "question": "...", "thread_id": "..."}}
+`pending_interrupt` не null, если тред застрял на human_check (сотрудник ушёл со страницы,
+не нажав Approve/Reject) - фронт должен отрендерить его как обычную живую HITL-карточку.
+Для claim'а, который ещё не открывали в чате, messages = [] и pending_interrupt = null
+(это не ошибка - у него просто ещё нет checkpoint'а).
+
 ## Инструменты (tools) агента - 3 штуки, простые Python-функции внутри backend
 1. get_claim_details(claim_id) -> данные claim'а из SQLite
 2. check_fraud_risk(claim_id) -> фейковый расчёт risk_score по сумме и истории
