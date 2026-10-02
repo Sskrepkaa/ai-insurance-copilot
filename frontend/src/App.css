@@ -198,24 +198,73 @@
   color: #111827;
 }
 
-.chat-panel__summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  font-size: 13px;
-  color: #4b5563;
+/* ---------- Claim facts card ---------- */
+
+.claim-facts-card {
+  margin-top: 10px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 12px 14px;
 }
 
-.chat-panel__summary-item--fraud {
+.claim-facts-card__grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.claim-facts-card__fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.claim-facts-card__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #9ca3af;
+}
+
+.claim-facts-card__value {
+  font-size: 14px;
   font-weight: 600;
+  color: #111827;
+}
+
+.claim-facts-card__value--fraud {
   color: #b45309;
 }
 
-.chat-panel__description {
-  margin: 8px 0 0;
+.claim-facts-card__description {
+  margin: 10px 0 0;
   font-size: 13px;
   color: #6b7280;
+}
+
+.claim-facts-card__suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.suggestion-chip {
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #4338ca;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.suggestion-chip:hover {
+  background: #e0e7ff;
+  border-color: #a5b4fc;
 }
 
 .chat-panel__status {

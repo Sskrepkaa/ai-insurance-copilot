@@ -7,6 +7,66 @@ function nextMessageId() {
   return messageIdCounter;
 }
 
+const SUGGESTIONS = [
+  {
+    label: "🔍 Проверить риск мошенничества",
+    prompt: "Проверь этот claim на мошенничество.",
+  },
+  {
+    label: "📋 История клиента",
+    prompt: "Покажи историю предыдущих claims этого клиента.",
+  },
+];
+
+function ClaimFactsCard({ claim, onSuggestion }) {
+  if (!claim) return null;
+
+  const amountText =
+    typeof claim.amount === "number" ? `$${claim.amount.toLocaleString()}` : claim.amount;
+
+  return (
+    <div className="claim-facts-card">
+      <div className="claim-facts-card__grid">
+        <div className="claim-facts-card__fact">
+          <span className="claim-facts-card__label">Amount</span>
+          <span className="claim-facts-card__value">{amountText}</span>
+        </div>
+        <div className="claim-facts-card__fact">
+          <span className="claim-facts-card__label">Status</span>
+          <span className={`status-badge status-badge--${claim.status}`}>{claim.status}</span>
+        </div>
+        <div className="claim-facts-card__fact">
+          <span className="claim-facts-card__label">Type</span>
+          <span className="claim-facts-card__value">{claim.type}</span>
+        </div>
+        {claim.fraud_risk != null && (
+          <div className="claim-facts-card__fact">
+            <span className="claim-facts-card__label">Fraud risk</span>
+            <span className="claim-facts-card__value claim-facts-card__value--fraud">
+              {claim.fraud_risk}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {claim.description && <p className="claim-facts-card__description">{claim.description}</p>}
+
+      <div className="claim-facts-card__suggestions">
+        {SUGGESTIONS.map((s) => (
+          <button
+            key={s.label}
+            type="button"
+            className="suggestion-chip"
+            onClick={() => onSuggestion(s.prompt)}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function JudgeDot({ judge }) {
   if (!judge) return null;
   const verdict = judge.verdict === "pass" ? "pass" : "fail";
@@ -38,6 +98,7 @@ export default function ChatPanel({ claimId, claim, detailsLoading, detailsError
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState(null);
   const bottomRef = useRef(null);
+  const textareaRef = useRef(null);
 
   // Reset the conversation whenever a different claim is selected, then
   // restore whatever the backend's checkpointer already remembers for this
@@ -155,6 +216,14 @@ export default function ChatPanel({ claimId, claim, detailsLoading, detailsError
     }
   };
 
+  // Suggestion chips only fill the input - the employee still decides
+  // whether/when to actually send it, so we don't burn a Groq call just
+  // because a claim was opened.
+  const handleSuggestion = (prompt) => {
+    setInput(prompt);
+    textareaRef.current?.focus();
+  };
+
   return (
     <div className="chat-panel">
       <div className="chat-panel__header">
@@ -168,22 +237,7 @@ export default function ChatPanel({ claimId, claim, detailsLoading, detailsError
           <p className="chat-panel__status chat-panel__status--error">{detailsError}</p>
         )}
 
-        {claim && (
-          <div className="chat-panel__summary">
-            <span className="chat-panel__summary-item">{claim.type}</span>
-            <span className="chat-panel__summary-item">
-              {typeof claim.amount === "number" ? `$${claim.amount.toLocaleString()}` : claim.amount}
-            </span>
-            <span className={`status-badge status-badge--${claim.status}`}>{claim.status}</span>
-            {claim.fraud_risk != null && (
-              <span className="chat-panel__summary-item chat-panel__summary-item--fraud">
-                Fraud risk: {claim.fraud_risk}
-              </span>
-            )}
-          </div>
-        )}
-
-        {claim?.description && <p className="chat-panel__description">{claim.description}</p>}
+        <ClaimFactsCard claim={claim} onSuggestion={handleSuggestion} />
       </div>
 
       <div className="chat-panel__messages">
@@ -269,6 +323,7 @@ export default function ChatPanel({ claimId, claim, detailsLoading, detailsError
 
       <div className="chat-panel__input">
         <textarea
+          ref={textareaRef}
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={handleKeyDown}

@@ -620,6 +620,18 @@ def extract_chat_history(messages) -> list[dict]:
     Used by GET /chat/{claim_id}/history so switching claims on the
     dashboard and coming back doesn't lose the conversation that's already
     sitting in the checkpointer.
+
+    Known limitation: restored "assistant" turns never carry a judge_score,
+    so the frontend can't show its groundedness/relevance dot on them. The
+    judge is only ever invoked live, inside /chat and /resume right after a
+    fresh answer is produced (see main.py) - judge_score is never written
+    into the checkpointer or anywhere else persistent, so there's nothing
+    to read back here. Fixing this would mean either persisting judge
+    results keyed by message/thread somewhere (a new table, or piggy-
+    backing on LangGraph's state/metadata) or re-running judge_response()
+    for every restored message on each history fetch (wasteful - it's a
+    real Groq call per message, just to redraw a dot). Not done now; flag
+    this if the project grows a reason to show historical judge verdicts.
     """
     history = []
     for msg in messages:

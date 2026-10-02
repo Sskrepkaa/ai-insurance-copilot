@@ -92,6 +92,10 @@ def chat_history(claim_id: str):
     A claim_id that was never chatted on has no checkpoint at all, not an
     error: get_state() just returns empty values, which comes back here as
     an empty history and no pending interrupt.
+
+    Known limitation: restored "assistant" messages have no judge_score
+    (the judge only ever runs live in /chat and /resume; nothing persists
+    it) - see agent.extract_chat_history()'s docstring for why.
     """
     config = {"configurable": {"thread_id": claim_id}}
     state = agent.graph.get_state(config)
