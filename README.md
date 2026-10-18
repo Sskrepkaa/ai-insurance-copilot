@@ -41,8 +41,8 @@ The full fixed API contract and component responsibilities are documented in [00
 ### 1. Clone
 
 ```bash
-git clone <this-repo-url>
-cd ai-insurance-supp
+git clone https://github.com/Sskrepkaa/ai-insurance-copilot.git
+cd ai-insurance-copilot
 ```
 
 ### 2. Backend
